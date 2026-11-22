@@ -1,0 +1,24 @@
+{
+	"schemaVersion": 1,
+	"id": "weihnachtsmod",
+	"version": "${version}",
+	"name": "Weihnachtsmod",
+	"description": "Serverseitige Weihnachtsmod: Adventskalender, Countdown, Schneemann, Weihnachtslieder und Schneeflocken.",
+	"authors": [
+		"Du"
+	],
+	"license": "CC0-1.0",
+	"icon": "assets/weihnachtsmod/icon.png",
+	"environment": "server",
+	"entrypoints": {
+		"main": [
+			"de.weihnachtsmod.WeihnachtsMod"
+		]
+	},
+	"depends": {
+		"fabricloader": ">=0.20.1",
+		"minecraft": "~26.3",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}
