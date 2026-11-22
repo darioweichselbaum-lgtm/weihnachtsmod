@@ -317,7 +317,7 @@ public class WeihnachtsMod implements ModInitializer {
         if (song.isAudio()) {
             Identifier id = Identifier.fromNamespaceAndPath(MOD_ID, song.soundName());
             AUDIO.put(target.getUUID(), id);
-            target.playNotifySound(SoundEvent.createVariableRangeEvent(id), SoundSource.RECORDS, 1.0f, 1.0f);
+            target.connection.send(new net.minecraft.network.protocol.game.ClientboundSoundPacket(Holder.direct(SoundEvent.createVariableRangeEvent(id)), SoundSource.RECORDS, target.getX(), target.getY(), target.getZ(), 1.0f, 1.0f, target.getRandom().nextLong()));
             if (song.seconds() > 0) {
                 s.audioTicksLeft = song.seconds() * 20 + 40;   // + 2 Sekunden Pause
             } else if (s.shuffle) {
@@ -467,7 +467,7 @@ public class WeihnachtsMod implements ModInitializer {
                 float pitch = pb.pitches[pb.index];
                 if (pitch > 0f) {
                     // nur dieser eine Spieler hört den Ton
-                    p.playNotifySound(pb.song.instrument().value(), SoundSource.RECORDS, 1.5f, pitch);
+                    p.connection.send(new net.minecraft.network.protocol.game.ClientboundSoundPacket(Holder.direct(pb.song.instrument().value()), SoundSource.RECORDS, p.getX(), p.getY(), p.getZ(), 1.5f, pitch, p.getRandom().nextLong()));
                     if (p.level() instanceof ServerLevel level) {
                         level.sendParticles(ParticleTypes.NOTE,
                                 p.getX(), p.getY() + 2.2, p.getZ(), 1, 0.3, 0.2, 0.3, 0.0);
