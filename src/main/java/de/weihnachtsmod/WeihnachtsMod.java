@@ -40,6 +40,7 @@ import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.CarvedPumpkinBlock;
+import net.minecraft.tags.BlockTags;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.levelgen.Heightmap;
@@ -96,7 +97,7 @@ public class WeihnachtsMod implements ModInitializer {
     private static final Set<Long> snowPlaced = new HashSet<>();                    // alle gesetzten Schneeschichten
     private static final Set<Long> snowKept = new HashSet<>();                      // beim Entfernen nicht geladen, bleiben vorgemerkt
     private static boolean snowLoaded = false;
-    private static final int SNOW_PER_TICK = 400;
+    private static final int SNOW_PER_TICK = 800;
     private static final int SNOW_REMOVE_PER_TICK = 600;
 
     // ---------- Weihnachtslieder ----------
@@ -467,6 +468,9 @@ public class WeihnachtsMod implements ModInitializer {
         // /schnee: Partikel in grossem Umkreis, Schnee setzen und entfernen
         ServerTickEvents.END_SERVER_TICK.register(server -> {
             ServerLevel level = server.overworld();
+            if (snowParticles && server.getTickCount() % 40 == 0 && (level.isRaining() || level.isThundering())) {
+                clearWeather(server);
+            }
             if (snowParticles && server.getTickCount() % 4 == 0) {
                 for (ServerPlayer player : server.getPlayerList().getPlayers()) {
                     if (player.level() == level) {
@@ -648,7 +652,7 @@ public class WeihnachtsMod implements ModInitializer {
             // /schnee [radius] | /schnee stop | /schnee weg
             dispatcher.register(Commands.literal("schnee")
                     .executes(ctx -> startSnow(ctx.getSource(), 48))
-                    .then(Commands.argument("radius", IntegerArgumentType.integer(8, 96))
+                    .then(Commands.argument("radius", IntegerArgumentType.integer(8, 256))
                             .executes(ctx -> startSnow(ctx.getSource(), IntegerArgumentType.getInteger(ctx, "radius"))))
                     .then(Commands.literal("stop").executes(ctx -> stopSnow(ctx.getSource())))
                     .then(Commands.literal("weg").executes(ctx -> removeSnow(ctx.getSource()))));
@@ -807,18 +811,24 @@ public class WeihnachtsMod implements ModInitializer {
     /** Setzt in dieser Spalte eine Schneeschicht (1 bis 3 hoch), wenn Schnee dort halten kann. */
     private static void placeSnowLayer(ServerLevel level, int x, int z) {
         if (!level.hasChunkAt(new BlockPos(x, 64, z))) return;
-        int y = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
+        int y = level.getHeight(Heightmap.Types.MOTION_BLOCKING, x, z);   // zaehlt Blaetter mit, Schnee liegt also auch auf Baeumen
         BlockPos pos = new BlockPos(x, y, z);
         BlockState here = level.getBlockState(pos);
         if (!(here.isAir() || here.canBeReplaced()) || !here.getFluidState().isEmpty()) return;
         BlockState snow = Blocks.SNOW.defaultBlockState();
-        if (!snow.canSurvive(level, pos)) return;
+        boolean onLeaves = level.getBlockState(pos.below()).is(BlockTags.LEAVES);
+        if (!snow.canSurvive(level, pos) && !onLeaves) return;
         // Wellen: mehrere Sinuswellen ergeben weiche Huegel und Taeler, dazu ein kleines Zufallsrauschen
         double wave = Math.sin(x * 0.30) + Math.sin(z * 0.25) + Math.sin((x + z) * 0.17) + Math.sin((x - z) * 0.11);
         double n = (wave + 4.0) / 8.0 + (level.getRandom().nextDouble() - 0.5) * 0.15;
         int layers = n < 0.40 ? 1 : (n < 0.60 ? 2 : 3);
-        level.setBlock(pos, snow.setValue(BlockStateProperties.LAYERS, layers), Block.UPDATE_ALL);
+        level.setBlock(pos, snow.setValue(BlockStateProperties.LAYERS, layers), onLeaves ? Block.UPDATE_CLIENTS : Block.UPDATE_ALL);
         snowPlaced.add(pos.asLong());
+    }
+
+    /** Beendet Regen und Gewitter (Wetter auf klar), damit nur Schnee faellt. */
+    private static void clearWeather(MinecraftServer server) {
+        server.getCommands().performPrefixedCommand(server.createCommandSourceStack().withSuppressedOutput(), "weather clear");
     }
 
     private static int startSnow(CommandSourceStack source, int radius) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
@@ -831,6 +841,7 @@ public class WeihnachtsMod implements ModInitializer {
         }
         loadSnow();
         snowParticles = true;
+        if (level.isRaining() || level.isThundering()) clearWeather(server);
         final int cx = player.getBlockX();
         final int cz = player.getBlockZ();
         List<BlockPos> columns = new ArrayList<>();
@@ -843,7 +854,7 @@ public class WeihnachtsMod implements ModInitializer {
                 b -> (b.getX() - cx) * (b.getX() - cx) + (b.getZ() - cz) * (b.getZ() - cz)));
         snowPending.addAll(columns);
         source.sendSuccess(() -> Component.literal("❄ Es schneit! Schnee im Umkreis von " + radius
-                + " Blöcken. /schnee stop beendet die Flocken, /schnee weg räumt den Schnee weg.")
+                + " Blöcken, auch auf Blättern. Regen wird beendet. /schnee stop beendet die Flocken, /schnee weg räumt den Schnee weg.")
                 .withStyle(ChatFormatting.WHITE), true);
         return 1;
     }
