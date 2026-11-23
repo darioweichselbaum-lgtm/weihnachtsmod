@@ -23,6 +23,7 @@ import net.minecraft.core.Direction;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.protocol.game.ClientboundSoundPacket;
 import net.minecraft.network.protocol.game.ClientboundStopSoundPacket;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.MinecraftServer;
@@ -39,6 +40,9 @@ import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.CarvedPumpkinBlock;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.level.levelgen.Heightmap;
 
 import java.io.IOException;
 import java.io.Reader;
@@ -85,6 +89,16 @@ public class WeihnachtsMod implements ModInitializer {
     private static final Map<String, Long> snowmanCooldown = new HashMap<>();
     private static final long SNOWMAN_COOLDOWN_MS = 30_000;
 
+    // ---------- /schnee ----------
+    private static boolean snowParticles = false;                                   // Partikel an/aus
+    private static final java.util.ArrayDeque<BlockPos> snowPending = new java.util.ArrayDeque<>();  // Spalten, die noch Schnee bekommen
+    private static final java.util.ArrayDeque<Long> snowRemoving = new java.util.ArrayDeque<>();     // Schneeschichten, die noch entfernt werden
+    private static final Set<Long> snowPlaced = new HashSet<>();                    // alle gesetzten Schneeschichten
+    private static final Set<Long> snowKept = new HashSet<>();                      // beim Entfernen nicht geladen, bleiben vorgemerkt
+    private static boolean snowLoaded = false;
+    private static final int SNOW_PER_TICK = 400;
+    private static final int SNOW_REMOVE_PER_TICK = 600;
+
     // ---------- Weihnachtslieder ----------
 
     /**
@@ -102,6 +116,12 @@ public class WeihnachtsMod implements ModInitializer {
 
     /** Aktuell laufende Audio-Aufnahmen (Resourcepack-Sounds), damit sie gestoppt werden können */
     private static final Map<UUID, Identifier> AUDIO = new HashMap<>();
+
+    /** Spielt einen Ton nur für diesen einen Spieler (an seiner Position). */
+    private static void playTo(ServerPlayer player, SoundEvent sound, float volume, float pitch) {
+        player.connection.send(new ClientboundSoundPacket(Holder.direct(sound), SoundSource.RECORDS,
+                player.getX(), player.getY(), player.getZ(), volume, pitch, player.getRandom().nextLong()));
+    }
 
     private static void stopAudio(ServerPlayer player) {
         Identifier id = AUDIO.remove(player.getUUID());
@@ -317,7 +337,7 @@ public class WeihnachtsMod implements ModInitializer {
         if (song.isAudio()) {
             Identifier id = Identifier.fromNamespaceAndPath(MOD_ID, song.soundName());
             AUDIO.put(target.getUUID(), id);
-            target.connection.send(new net.minecraft.network.protocol.game.ClientboundSoundPacket(Holder.direct(SoundEvent.createVariableRangeEvent(id)), SoundSource.RECORDS, target.getX(), target.getY(), target.getZ(), 1.0f, 1.0f, target.getRandom().nextLong()));
+            playTo(target, SoundEvent.createVariableRangeEvent(id), 1.0f, 1.0f);
             if (song.seconds() > 0) {
                 s.audioTicksLeft = song.seconds() * 20 + 40;   // + 2 Sekunden Pause
             } else if (s.shuffle) {
@@ -444,6 +464,46 @@ public class WeihnachtsMod implements ModInitializer {
             }
         });
 
+        // /schnee: Partikel in grossem Umkreis, Schnee setzen und entfernen
+        ServerTickEvents.END_SERVER_TICK.register(server -> {
+            ServerLevel level = server.overworld();
+            if (snowParticles && server.getTickCount() % 4 == 0) {
+                for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+                    if (player.level() == level) {
+                        level.sendParticles(ParticleTypes.SNOWFLAKE,
+                                player.getX(), player.getY() + 6, player.getZ(),
+                                90, 14.0, 5.0, 14.0, 0.02);
+                    }
+                }
+            }
+            int placed = 0;
+            while (placed < SNOW_PER_TICK && !snowPending.isEmpty()) {
+                BlockPos column = snowPending.poll();
+                placed++;
+                placeSnowLayer(level, column.getX(), column.getZ());
+            }
+            if (placed > 0 && snowPending.isEmpty()) saveSnow();
+            if (placed > 0 && server.getTickCount() % 200 == 0) saveSnow();
+            if (!snowRemoving.isEmpty()) {
+                int removed = 0;
+                while (removed < SNOW_REMOVE_PER_TICK && !snowRemoving.isEmpty()) {
+                    long packed = snowRemoving.poll();
+                    removed++;
+                    BlockPos pos = BlockPos.of(packed);
+                    if (!level.hasChunkAt(pos)) {
+                        snowKept.add(packed);
+                    } else if (level.getBlockState(pos).is(Blocks.SNOW)) {
+                        level.setBlock(pos, Blocks.AIR.defaultBlockState(), Block.UPDATE_ALL);
+                    }
+                }
+                if (snowRemoving.isEmpty()) {
+                    snowPlaced.addAll(snowKept);
+                    snowKept.clear();
+                    saveSnow();
+                }
+            }
+        });
+
         // Weihnachtslieder abspielen (jeden Tick)
         ServerTickEvents.END_SERVER_TICK.register(server -> {
             List<ServerPlayer> toAdvance = new ArrayList<>();   // Shuffle: Spieler, die ein neues Lied brauchen
@@ -467,7 +527,7 @@ public class WeihnachtsMod implements ModInitializer {
                 float pitch = pb.pitches[pb.index];
                 if (pitch > 0f) {
                     // nur dieser eine Spieler hört den Ton
-                    p.connection.send(new net.minecraft.network.protocol.game.ClientboundSoundPacket(Holder.direct(pb.song.instrument().value()), SoundSource.RECORDS, p.getX(), p.getY(), p.getZ(), 1.5f, pitch, p.getRandom().nextLong()));
+                    playTo(p, pb.song.instrument().value(), 1.5f, pitch);
                     if (p.level() instanceof ServerLevel level) {
                         level.sendParticles(ParticleTypes.NOTE,
                                 p.getX(), p.getY() + 2.2, p.getZ(), 1, 0.3, 0.2, 0.3, 0.0);
@@ -585,6 +645,14 @@ public class WeihnachtsMod implements ModInitializer {
                             .executes(ctx -> runTellerFunction(ctx.getSource(), ctx.getSource().getPlayerOrException(),
                                     "teller_weg", "Teller entfernt."))));
 
+            // /schnee [radius] | /schnee stop | /schnee weg
+            dispatcher.register(Commands.literal("schnee")
+                    .executes(ctx -> startSnow(ctx.getSource(), 48))
+                    .then(Commands.argument("radius", IntegerArgumentType.integer(8, 96))
+                            .executes(ctx -> startSnow(ctx.getSource(), IntegerArgumentType.getInteger(ctx, "radius"))))
+                    .then(Commands.literal("stop").executes(ctx -> stopSnow(ctx.getSource())))
+                    .then(Commands.literal("weg").executes(ctx -> removeSnow(ctx.getSource()))));
+
             dispatcher.register(Commands.literal("schneemann").executes(ctx -> {
                 ServerPlayer player = ctx.getSource().getPlayerOrException();
                 if (!(player.level() instanceof ServerLevel level)) return 0;
@@ -696,6 +764,108 @@ public class WeihnachtsMod implements ModInitializer {
         else if (days < 0) text = "🎄 Frohe Weihnachten und ein gutes neues Jahr!";
         else text = "⏳ Noch " + days + (days == 1 ? " Tag" : " Tage") + " bis Heiligabend!";
         return Component.literal(text).withStyle(ChatFormatting.AQUA);
+    }
+
+    // ---------- /schnee: Hilfsmethoden ----------
+
+    private static Path snowFile() {
+        return FabricLoader.getInstance().getConfigDir().resolve("weihnachtsmod_schnee.json");
+    }
+
+    /** Liest gespeicherte Schneeschichten (einmal pro Serverstart), damit /schnee weg auch nach einem Neustart klappt. */
+    private static void loadSnow() {
+        if (snowLoaded) return;
+        snowLoaded = true;
+        Path file = snowFile();
+        if (!Files.exists(file)) return;
+        try (Reader reader = Files.newBufferedReader(file)) {
+            Gson gson = new Gson();
+            JsonObject obj = gson.fromJson(reader, JsonObject.class);
+            if (obj != null && obj.has("positions")) {
+                long[] arr = gson.fromJson(obj.get("positions"), long[].class);
+                for (long l : arr) snowPlaced.add(l);
+            }
+        } catch (Exception e) {
+            System.err.println("[Weihnachtsmod] Konnte " + file + " nicht lesen: " + e);
+        }
+    }
+
+    private static void saveSnow() {
+        try {
+            long[] arr = new long[snowPlaced.size()];
+            int i = 0;
+            for (long l : snowPlaced) arr[i++] = l;
+            Gson gson = new Gson();
+            JsonObject obj = new JsonObject();
+            obj.add("positions", gson.toJsonTree(arr));
+            Files.writeString(snowFile(), gson.toJson(obj));
+        } catch (Exception e) {
+            System.err.println("[Weihnachtsmod] Konnte Schnee-Datei nicht speichern: " + e);
+        }
+    }
+
+    /** Setzt in dieser Spalte eine Schneeschicht (1 bis 3 hoch), wenn Schnee dort halten kann. */
+    private static void placeSnowLayer(ServerLevel level, int x, int z) {
+        if (!level.hasChunkAt(new BlockPos(x, 64, z))) return;
+        int y = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
+        BlockPos pos = new BlockPos(x, y, z);
+        BlockState here = level.getBlockState(pos);
+        if (!(here.isAir() || here.canBeReplaced()) || !here.getFluidState().isEmpty()) return;
+        BlockState snow = Blocks.SNOW.defaultBlockState();
+        if (!snow.canSurvive(level, pos)) return;
+        // Wellen: mehrere Sinuswellen ergeben weiche Huegel und Taeler, dazu ein kleines Zufallsrauschen
+        double wave = Math.sin(x * 0.30) + Math.sin(z * 0.25) + Math.sin((x + z) * 0.17) + Math.sin((x - z) * 0.11);
+        double n = (wave + 4.0) / 8.0 + (level.getRandom().nextDouble() - 0.5) * 0.15;
+        int layers = n < 0.40 ? 1 : (n < 0.60 ? 2 : 3);
+        level.setBlock(pos, snow.setValue(BlockStateProperties.LAYERS, layers), Block.UPDATE_ALL);
+        snowPlaced.add(pos.asLong());
+    }
+
+    private static int startSnow(CommandSourceStack source, int radius) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        if (!(player.level() instanceof ServerLevel level)) return 0;
+        MinecraftServer server = level.getServer();
+        if (level != server.overworld()) {
+            source.sendFailure(Component.literal("Schnee gibt es nur in der Oberwelt."));
+            return 0;
+        }
+        loadSnow();
+        snowParticles = true;
+        final int cx = player.getBlockX();
+        final int cz = player.getBlockZ();
+        List<BlockPos> columns = new ArrayList<>();
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dz = -radius; dz <= radius; dz++) {
+                if (dx * dx + dz * dz <= radius * radius) columns.add(new BlockPos(cx + dx, 0, cz + dz));
+            }
+        }
+        columns.sort(java.util.Comparator.comparingInt(
+                b -> (b.getX() - cx) * (b.getX() - cx) + (b.getZ() - cz) * (b.getZ() - cz)));
+        snowPending.addAll(columns);
+        source.sendSuccess(() -> Component.literal("❄ Es schneit! Schnee im Umkreis von " + radius
+                + " Blöcken. /schnee stop beendet die Flocken, /schnee weg räumt den Schnee weg.")
+                .withStyle(ChatFormatting.WHITE), true);
+        return 1;
+    }
+
+    private static int stopSnow(CommandSourceStack source) {
+        snowParticles = false;
+        snowPending.clear();
+        source.sendSuccess(() -> Component.literal("Die Schneeflocken hören auf. Der Schnee am Boden bleibt, /schnee weg räumt ihn weg.")
+                .withStyle(ChatFormatting.AQUA), true);
+        return 1;
+    }
+
+    private static int removeSnow(CommandSourceStack source) {
+        loadSnow();
+        snowPending.clear();
+        final int count = snowPlaced.size();
+        snowRemoving.addAll(snowPlaced);
+        snowPlaced.clear();
+        source.sendSuccess(() -> Component.literal("Der Schnee wird weggeräumt (" + count + " Schichten). "
+                + "Teile, die gerade nicht geladen sind, bleiben stehen: dort noch einmal /schnee weg.")
+                .withStyle(ChatFormatting.AQUA), true);
+        return count;
     }
 
     /** Macht alle Item Frames (auch leuchtende) im Umkreis unsichtbar oder wieder sichtbar. */
