@@ -640,6 +640,11 @@ public class WeihnachtsMod implements ModInitializer {
                                             ctx.getSource().getPlayerOrException(), false,
                                             IntegerArgumentType.getInteger(ctx, "radius"))))));
 
+            // /rahmen item | /rahmen leuchtend -> gibt dir einen Item Frame, der unsichtbar platziert wird
+            dispatcher.register(Commands.literal("rahmen")
+                    .then(Commands.literal("item").executes(ctx -> giveInvisibleFrame(ctx.getSource(), false)))
+                    .then(Commands.literal("leuchtend").executes(ctx -> giveInvisibleFrame(ctx.getSource(), true))));
+
             // /teller      -> unsichtbarer Item Frame mit Teller an deiner Position
             // /teller weg  -> entfernt den nächsten Teller
             dispatcher.register(Commands.literal("teller")
@@ -877,6 +882,20 @@ public class WeihnachtsMod implements ModInitializer {
                 + "Teile, die gerade nicht geladen sind, bleiben stehen: dort noch einmal /schnee weg.")
                 .withStyle(ChatFormatting.AQUA), true);
         return count;
+    }
+
+    /** Gibt dem Spieler einen Item Frame, der beim Platzieren unsichtbar ist. */
+    private static int giveInvisibleFrame(CommandSourceStack source, boolean glow) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        if (!(player.level() instanceof ServerLevel level)) return 0;
+        MinecraftServer server = level.getServer();
+        String id = glow ? "glow_item_frame" : "item_frame";
+        CommandSourceStack stack = server.createCommandSourceStack().withEntity(player).withSuppressedOutput();
+        server.getCommands().performPrefixedCommand(stack,
+                "give @s " + id + "[entity_data={id:\"minecraft:" + id + "\",Invisible:1b}]");
+        source.sendSuccess(() -> Component.literal("Du hast einen unsichtbaren Rahmen bekommen. "
+                + "Lege ein Item hinein, sonst siehst du ihn gar nicht.").withStyle(ChatFormatting.GREEN), false);
+        return 1;
     }
 
     /** Macht alle Item Frames (auch leuchtende) im Umkreis unsichtbar oder wieder sichtbar. */
