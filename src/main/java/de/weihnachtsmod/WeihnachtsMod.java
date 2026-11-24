@@ -645,6 +645,10 @@ public class WeihnachtsMod implements ModInitializer {
                     .then(Commands.literal("item").executes(ctx -> giveInvisibleFrame(ctx.getSource(), false)))
                     .then(Commands.literal("leuchtend").executes(ctx -> giveInvisibleFrame(ctx.getSource(), true))));
 
+            // /weihnachtshilfe -> zeigt alle Befehle der Mod im Chat
+            dispatcher.register(Commands.literal("weihnachtshilfe")
+                    .executes(ctx -> showHelp(ctx.getSource())));
+
             // /teller      -> unsichtbarer Item Frame mit Teller an deiner Position
             // /teller weg  -> entfernt den nächsten Teller
             dispatcher.register(Commands.literal("teller")
@@ -895,6 +899,45 @@ public class WeihnachtsMod implements ModInitializer {
                 "give @s " + id + "[entity_data={id:\"minecraft:" + id + "\",Invisible:1b}]");
         source.sendSuccess(() -> Component.literal("Du hast einen unsichtbaren Rahmen bekommen. "
                 + "Lege ein Item hinein, sonst siehst du ihn gar nicht.").withStyle(ChatFormatting.GREEN), false);
+        return 1;
+    }
+
+    private static void helpLine(CommandSourceStack source, String command, String text) {
+        source.sendSuccess(() -> Component.literal(command).withStyle(ChatFormatting.AQUA)
+                .append(Component.literal("  " + text).withStyle(ChatFormatting.GRAY)), false);
+    }
+
+    private static void helpTitle(CommandSourceStack source, String title) {
+        source.sendSuccess(() -> Component.literal(title).withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD), false);
+    }
+
+    /** Zeigt alle Befehle der Weihnachtsmod. */
+    private static int showHelp(CommandSourceStack source) {
+        helpTitle(source, "Weihnachtsmod: alle Befehle");
+        helpTitle(source, "Allgemein");
+        helpLine(source, "/weihnachten", "Countdown bis Heiligabend");
+        helpLine(source, "/adventskalender", "Tägliches Türchen (1. bis 24. Dezember)");
+        helpLine(source, "/schneemann", "Baut vor dir einen Schneemann");
+        helpTitle(source, "Schnee");
+        helpLine(source, "/schnee [radius]", "Schneeflocken und Schnee in Wellen, Radius 8 bis 256, beendet Regen");
+        helpLine(source, "/schnee stop", "Beendet die Flocken, der Schnee bleibt");
+        helpLine(source, "/schnee weg", "Räumt den gesetzten Schnee weg");
+        helpTitle(source, "Rahmen und Teller");
+        helpLine(source, "/rahmen item", "Gibt dir einen unsichtbaren Item Frame");
+        helpLine(source, "/rahmen leuchtend", "Gibt dir einen unsichtbaren leuchtenden Rahmen");
+        helpLine(source, "/rahmen unsichtbar [radius]", "Macht Rahmen in der Nähe unsichtbar");
+        helpLine(source, "/rahmen sichtbar [radius]", "Macht sie wieder sichtbar");
+        helpLine(source, "/teller", "Stellt Rahmen mit Teller an deine Position");
+        helpLine(source, "/teller weg", "Entfernt den nächsten Teller");
+        helpTitle(source, "Weihnachtslieder");
+        helpLine(source, "/weihnachtslied", "Zufälliges Lied");
+        helpLine(source, "/weihnachtslied <lied> [spieler]", "Bestimmtes Lied, optional für einen Spieler");
+        helpLine(source, "/weihnachtslied liste", "Alle Lieder anzeigen");
+        helpLine(source, "/weihnachtslied skip [spieler]", "Nächstes Lied");
+        helpLine(source, "/weihnachtslied shuffle [alle|noten|gesang] [spieler]", "Zufallswiedergabe an oder aus");
+        helpLine(source, "/weihnachtslied stop [spieler]", "Musik stoppen");
+        helpTitle(source, "Hilfe");
+        helpLine(source, "/weihnachtshilfe", "Zeigt diese Liste");
         return 1;
     }
 
