@@ -97,11 +97,16 @@ public class WeihnachtsMod implements ModInitializer {
     private static final Set<Long> snowPlaced = new HashSet<>();                    // alle gesetzten Schneeschichten
     private static final Set<Long> snowKept = new HashSet<>();                      // beim Entfernen nicht geladen, bleiben vorgemerkt
     private static boolean snowLoaded = false;
-    private static final Set<Long> snowConverted = new HashSet<>();                 // Erdbloecke unter dem Schnee, die zu Gras wurden
-    private static final java.util.ArrayDeque<Long> snowRevert = new java.util.ArrayDeque<>();      // Erdbloecke, die wieder zu Erde werden
-    private static final Set<Long> snowConvKept = new HashSet<>();                  // beim Zurueckwandeln nicht geladen
-    // Ab wie vielen Schneeschichten die Erde darunter zu Gras (mit weissem Schneerand) wird: 1 = unter jedem Schnee, 3 = nur unter den hohen Schichten
+    private static final Set<Long> snowConverted = new HashSet<>();                 // Bodenblöcke unter dem Schnee, die verwandelt wurden (Gras oder Podsol)
+    private static final Set<Long> snowGrassOrigin = new HashSet<>();               // davon: Blöcke, die vorher Gras waren (sonst waren sie Erde)
+    private static final java.util.ArrayDeque<Long> snowRevert = new java.util.ArrayDeque<>();      // Bodenblöcke, die wieder zurückverwandelt werden
+    private static final Set<Long> snowConvKept = new HashSet<>();                  // beim Zurückwandeln nicht geladen
+    // Ab wie vielen Schneeschichten Erde unter dem Schnee zu Gras wird (weisser Schneerand): 1 = unter jedem Schnee
     private static final int SNOW_GROUND_MIN_LAYERS = 1;
+    // Ab wie vielen Schichten der Boden zu Podsol wird. Gras stirbt unter 2+ Schichten ab, Podsol nicht, und es zeigt auch den weissen Schneerand.
+    private static final int SNOW_PODZOL_MIN_LAYERS = 2;
+    // Größter Radius für /schnee und /schnee weg
+    private static final int SNOW_MAX_RADIUS = 300;
     private static final int SNOW_PER_TICK = 800;
     private static final int SNOW_REMOVE_PER_TICK = 600;
 
@@ -501,8 +506,12 @@ public class WeihnachtsMod implements ModInitializer {
                     BlockPos pos = BlockPos.of(packed);
                     if (!level.hasChunkAt(pos)) {
                         snowConvKept.add(packed);
-                    } else if (level.getBlockState(pos).is(Blocks.GRASS_BLOCK)) {
-                        level.setBlock(pos, Blocks.DIRT.defaultBlockState(), Block.UPDATE_ALL);
+                    } else {
+                        BlockState st = level.getBlockState(pos);
+                        boolean wasGrass = snowGrassOrigin.remove(packed);
+                        if (st.is(Blocks.GRASS_BLOCK) || st.is(Blocks.PODZOL) || (wasGrass && st.is(Blocks.DIRT))) {
+                            level.setBlock(pos, (wasGrass ? Blocks.GRASS_BLOCK : Blocks.DIRT).defaultBlockState(), Block.UPDATE_ALL);
+                        }
                     }
                 }
                 if (snowRevert.isEmpty()) {
@@ -681,13 +690,16 @@ public class WeihnachtsMod implements ModInitializer {
                             .executes(ctx -> runTellerFunction(ctx.getSource(), ctx.getSource().getPlayerOrException(),
                                     "teller_weg", "Teller entfernt."))));
 
-            // /schnee [radius] | /schnee stop | /schnee weg
+            // /schnee [radius] | /schnee stop | /schnee weg [radius]
             dispatcher.register(Commands.literal("schnee")
                     .executes(ctx -> startSnow(ctx.getSource(), 48))
-                    .then(Commands.argument("radius", IntegerArgumentType.integer(8, 256))
+                    .then(Commands.argument("radius", IntegerArgumentType.integer(8, SNOW_MAX_RADIUS))
                             .executes(ctx -> startSnow(ctx.getSource(), IntegerArgumentType.getInteger(ctx, "radius"))))
                     .then(Commands.literal("stop").executes(ctx -> stopSnow(ctx.getSource())))
-                    .then(Commands.literal("weg").executes(ctx -> removeSnow(ctx.getSource()))));
+                    .then(Commands.literal("weg")
+                            .executes(ctx -> removeSnow(ctx.getSource(), 0))
+                            .then(Commands.argument("radius", IntegerArgumentType.integer(1, SNOW_MAX_RADIUS))
+                                    .executes(ctx -> removeSnow(ctx.getSource(), IntegerArgumentType.getInteger(ctx, "radius"))))));
 
             dispatcher.register(Commands.literal("schneemann").executes(ctx -> {
                 ServerPlayer player = ctx.getSource().getPlayerOrException();
@@ -825,6 +837,10 @@ public class WeihnachtsMod implements ModInitializer {
                 long[] conv = gson.fromJson(obj.get("converted"), long[].class);
                 for (long l : conv) snowConverted.add(l);
             }
+            if (obj != null && obj.has("grassOrigin")) {
+                long[] origin = gson.fromJson(obj.get("grassOrigin"), long[].class);
+                for (long l : origin) snowGrassOrigin.add(l);
+            }
         } catch (Exception e) {
             System.err.println("[Weihnachtsmod] Konnte " + file + " nicht lesen: " + e);
         }
@@ -842,6 +858,10 @@ public class WeihnachtsMod implements ModInitializer {
             int j = 0;
             for (long l : snowConverted) conv[j++] = l;
             obj.add("converted", gson.toJsonTree(conv));
+            long[] origin = new long[snowGrassOrigin.size()];
+            int k = 0;
+            for (long l : snowGrassOrigin) origin[k++] = l;
+            obj.add("grassOrigin", gson.toJsonTree(origin));
             Files.writeString(snowFile(), gson.toJson(obj));
         } catch (Exception e) {
             System.err.println("[Weihnachtsmod] Konnte Schnee-Datei nicht speichern: " + e);
@@ -862,12 +882,20 @@ public class WeihnachtsMod implements ModInitializer {
         double wave = Math.sin(x * 0.30) + Math.sin(z * 0.25) + Math.sin((x + z) * 0.17) + Math.sin((x - z) * 0.11);
         double n = (wave + 4.0) / 8.0 + (level.getRandom().nextDouble() - 0.5) * 0.15;
         int layers = n < 0.40 ? 1 : (n < 0.60 ? 2 : 3);
-        // Erde unter dem Schnee wird zu Gras, dann zeigt sie den weissen Schneerand (wie bei Gras unter Schnee)
+        // Boden unter dem Schnee: bei 1 Schicht wird Erde zu Gras, ab 2 Schichten wird Gras/Erde zu Podsol.
+        // Gras wuerde unter 2+ Schichten zu Erde absterben, Podsol bleibt und zeigt ebenfalls den weissen Schneerand.
         BlockPos below = pos.below();
         BlockState belowState = level.getBlockState(below);
-        if (layers >= SNOW_GROUND_MIN_LAYERS && (belowState.is(Blocks.DIRT) || belowState.is(Blocks.COARSE_DIRT) || belowState.is(Blocks.ROOTED_DIRT))) {
+        boolean isDirtType = belowState.is(Blocks.DIRT) || belowState.is(Blocks.COARSE_DIRT) || belowState.is(Blocks.ROOTED_DIRT);
+        boolean isGrass = belowState.is(Blocks.GRASS_BLOCK);
+        long belowKey = below.asLong();
+        if (layers >= SNOW_PODZOL_MIN_LAYERS && (isDirtType || isGrass)) {
+            if (isGrass && !snowConverted.contains(belowKey)) snowGrassOrigin.add(belowKey);   // war urspruenglich Gras
+            level.setBlock(below, Blocks.PODZOL.defaultBlockState(), Block.UPDATE_ALL);
+            snowConverted.add(belowKey);
+        } else if (layers >= SNOW_GROUND_MIN_LAYERS && isDirtType) {
             level.setBlock(below, Blocks.GRASS_BLOCK.defaultBlockState(), Block.UPDATE_ALL);
-            snowConverted.add(below.asLong());
+            snowConverted.add(belowKey);
         }
         level.setBlock(pos, snow.setValue(BlockStateProperties.LAYERS, layers), onLeaves ? Block.UPDATE_CLIENTS : Block.UPDATE_ALL);
         snowPlaced.add(pos.asLong());
@@ -901,7 +929,8 @@ public class WeihnachtsMod implements ModInitializer {
                 b -> (b.getX() - cx) * (b.getX() - cx) + (b.getZ() - cz) * (b.getZ() - cz)));
         snowPending.addAll(columns);
         source.sendSuccess(() -> Component.literal("❄ Es schneit! Schnee im Umkreis von " + radius
-                + " Blöcken, auch auf Blättern. Regen wird beendet. /schnee stop beendet die Flocken, /schnee weg räumt den Schnee weg.")
+                + " Blöcken, auch auf Blättern. Regen wird beendet. /schnee stop beendet die Flocken, /schnee weg räumt den Schnee weg."
+                + " Schnee entsteht nur in Bereichen, die der Server geladen hat.")
                 .withStyle(ChatFormatting.WHITE), true);
         return 1;
     }
@@ -914,18 +943,55 @@ public class WeihnachtsMod implements ModInitializer {
         return 1;
     }
 
-    private static int removeSnow(CommandSourceStack source) {
+    /** true, wenn die gespeicherte Position innerhalb des Radius um (cx, cz) liegt. */
+    private static boolean inSnowRadius(long packed, int cx, int cz, long radiusSq) {
+        BlockPos p = BlockPos.of(packed);
+        long dx = p.getX() - cx;
+        long dz = p.getZ() - cz;
+        return dx * dx + dz * dz <= radiusSq;
+    }
+
+    /**
+     * /schnee weg         : räumt ALLEN gesetzten Schnee weg, egal wie weit weg.
+     * /schnee weg <radius>: räumt nur den Schnee im Umkreis um dich weg (bis 300 Blöcke).
+     */
+    private static int removeSnow(CommandSourceStack source, int radius) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         loadSnow();
         snowPending.clear();
-        final int count = snowPlaced.size();
-        snowRemoving.addAll(snowPlaced);
-        snowPlaced.clear();
-        snowRevert.addAll(snowConverted);
-        snowConverted.clear();
-        source.sendSuccess(() -> Component.literal("Der Schnee wird weggeräumt (" + count + " Schichten). "
+        int cx = 0;
+        int cz = 0;
+        if (radius > 0) {
+            ServerPlayer player = source.getPlayerOrException();
+            cx = player.getBlockX();
+            cz = player.getBlockZ();
+        }
+        final long radiusSq = (long) radius * radius;
+
+        int count = 0;
+        Iterator<Long> snowIt = snowPlaced.iterator();
+        while (snowIt.hasNext()) {
+            long packed = snowIt.next();
+            if (radius <= 0 || inSnowRadius(packed, cx, cz, radiusSq)) {
+                snowRemoving.add(packed);
+                snowIt.remove();
+                count++;
+            }
+        }
+        Iterator<Long> groundIt = snowConverted.iterator();
+        while (groundIt.hasNext()) {
+            long packed = groundIt.next();
+            if (radius <= 0 || inSnowRadius(packed, cx, cz, radiusSq)) {
+                snowRevert.add(packed);
+                groundIt.remove();
+            }
+        }
+
+        final int total = count;
+        final String where = radius > 0 ? " im Umkreis von " + radius + " Blöcken" : " überall";
+        source.sendSuccess(() -> Component.literal("Der Schnee wird weggeräumt" + where + " (" + total + " Schichten). "
                 + "Teile, die gerade nicht geladen sind, bleiben stehen: dort noch einmal /schnee weg.")
                 .withStyle(ChatFormatting.AQUA), true);
-        return count;
+        return total;
     }
 
     /** Gibt dem Spieler einen Item Frame, der beim Platzieren unsichtbar ist. */
@@ -959,9 +1025,10 @@ public class WeihnachtsMod implements ModInitializer {
         helpLine(source, "/adventskalender", "Tägliches Türchen (1. bis 24. Dezember)");
         helpLine(source, "/schneemann", "Baut vor dir einen Schneemann");
         helpTitle(source, "Schnee");
-        helpLine(source, "/schnee [radius]", "Schneeflocken und Schnee in Wellen, Radius 8 bis 256, beendet Regen");
+        helpLine(source, "/schnee [radius]", "Schneeflocken und Schnee in Wellen, Radius 8 bis 300, beendet Regen");
         helpLine(source, "/schnee stop", "Beendet die Flocken, der Schnee bleibt");
-        helpLine(source, "/schnee weg", "Räumt den gesetzten Schnee weg");
+        helpLine(source, "/schnee weg", "Räumt den gesetzten Schnee überall weg");
+        helpLine(source, "/schnee weg [radius]", "Räumt nur den Schnee im Umkreis weg, bis 300 Blöcke");
         helpTitle(source, "Rahmen und Teller");
         helpLine(source, "/rahmen item", "Gibt dir einen unsichtbaren Item Frame");
         helpLine(source, "/rahmen leuchtend", "Gibt dir einen unsichtbaren leuchtenden Rahmen");
