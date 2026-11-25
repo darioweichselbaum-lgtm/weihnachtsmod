@@ -462,7 +462,7 @@ public class WeihnachtsMod implements ModInitializer {
 
         // Schneeflocken um jeden Spieler (alle 1 Sekunde)
         ServerTickEvents.END_SERVER_TICK.register(server -> {
-            if (server.getTickCount() % 20 != 0 || !isChristmasSeason()) return;
+            if (true) return; // Dauer-Flocken aus, Flocken nur noch per /schnee
             for (ServerPlayer player : server.getPlayerList().getPlayers()) {
                 if (player.level() instanceof ServerLevel level) {
                     level.sendParticles(ParticleTypes.SNOWFLAKE,
