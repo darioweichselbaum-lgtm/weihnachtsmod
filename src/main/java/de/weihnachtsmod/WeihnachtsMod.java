@@ -32,6 +32,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.sounds.SoundEvent;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
+import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.decoration.ItemFrame;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.player.Player;
@@ -691,6 +692,11 @@ public class WeihnachtsMod implements ModInitializer {
                     .then(Commands.literal("item").executes(ctx -> giveInvisibleFrame(ctx.getSource(), false)))
                     .then(Commands.literal("leuchtend").executes(ctx -> giveInvisibleFrame(ctx.getSource(), true))));
 
+            // /zipfelmuetze [alle] -> Zipfelmütze für dich oder für alle Spieler, die online sind
+            dispatcher.register(Commands.literal("zipfelmuetze")
+                    .executes(ctx -> giveHat(ctx.getSource(), false))
+                    .then(Commands.literal("alle").executes(ctx -> giveHat(ctx.getSource(), true))));
+
             // /weihnachtshilfe -> zeigt alle Befehle der Mod im Chat
             dispatcher.register(Commands.literal("weihnachtshilfe")
                     .executes(ctx -> showHelp(ctx.getSource())));
@@ -1027,6 +1033,32 @@ public class WeihnachtsMod implements ModInitializer {
         return 1;
     }
 
+    /** Setzt eine Zipfelmütze auf den Kopf (nur wenn dort noch nichts getragen wird). Sie ist ein Papier mit eigenem Modell im Resource Pack. */
+    private static int giveHat(CommandSourceStack source, boolean all) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer self = source.getPlayerOrException();
+        if (!(self.level() instanceof ServerLevel level)) return 0;
+        MinecraftServer server = level.getServer();
+        List<ServerPlayer> targets = all ? new ArrayList<>(server.getPlayerList().getPlayers()) : List.of(self);
+        int given = 0;
+        int skipped = 0;
+        for (ServerPlayer target : targets) {
+            if (!target.getItemBySlot(EquipmentSlot.HEAD).isEmpty()) {
+                skipped++;
+                continue;
+            }
+            CommandSourceStack stack = server.createCommandSourceStack().withEntity(target).withSuppressedOutput();
+            server.getCommands().performPrefixedCommand(stack,
+                    "item replace entity @s armor.head with minecraft:paper[item_model=\"weihnachtsmod:zipfelmuetze\",equippable={slot:\"head\"}]");
+            given++;
+        }
+        final int g = given;
+        final int sk = skipped;
+        source.sendSuccess(() -> Component.literal("🎅 " + g + " Zipfelmütze(n) verteilt"
+                + (sk > 0 ? ", " + sk + " Spieler tragen schon etwas auf dem Kopf." : "."))
+                .withStyle(ChatFormatting.RED), true);
+        return given;
+    }
+
     private static void helpLine(CommandSourceStack source, String command, String text) {
         source.sendSuccess(() -> Component.literal(command).withStyle(ChatFormatting.AQUA)
                 .append(Component.literal("  " + text).withStyle(ChatFormatting.GRAY)), false);
@@ -1054,6 +1086,9 @@ public class WeihnachtsMod implements ModInitializer {
         helpLine(source, "/rahmen sichtbar [radius]", "Macht sie wieder sichtbar");
         helpLine(source, "/teller", "Stellt Rahmen mit Teller an deine Position");
         helpLine(source, "/teller weg", "Entfernt den nächsten Teller");
+        helpTitle(source, "Zipfelmütze");
+        helpLine(source, "/zipfelmuetze", "Setzt dir eine Zipfelmütze auf");
+        helpLine(source, "/zipfelmuetze alle", "Setzt allen Spielern, die online sind, eine Zipfelmütze auf");
         helpTitle(source, "Weihnachtslieder");
         helpLine(source, "/weihnachtslied", "Zufälliges Lied");
         helpLine(source, "/weihnachtslied <lied> [spieler]", "Bestimmtes Lied, optional für einen Spieler");
