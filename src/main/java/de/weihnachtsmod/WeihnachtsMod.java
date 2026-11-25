@@ -91,6 +91,7 @@ public class WeihnachtsMod implements ModInitializer {
     private static final Map<String, Long> snowmanCooldown = new HashMap<>();
     private static final long SNOWMAN_COOLDOWN_MS = 30_000;
 
+    private static boolean flockenAn = false;   // /flocken: kleine Flocken um den Spieler
     // ---------- /schnee ----------
     private static boolean snowParticles = false;                                   // Partikel an/aus
     private static final java.util.ArrayDeque<BlockPos> snowPending = new java.util.ArrayDeque<>();  // Spalten, die noch Schnee bekommen
@@ -462,7 +463,7 @@ public class WeihnachtsMod implements ModInitializer {
 
         // Schneeflocken um jeden Spieler (alle 1 Sekunde)
         ServerTickEvents.END_SERVER_TICK.register(server -> {
-            if (true) return; // Dauer-Flocken aus, Flocken nur noch per /schnee
+            if (server.getTickCount() % 20 != 0 || !flockenAn) return;
             for (ServerPlayer player : server.getPlayerList().getPlayers()) {
                 if (player.level() instanceof ServerLevel level) {
                     level.sendParticles(ParticleTypes.SNOWFLAKE,
@@ -721,6 +722,21 @@ public class WeihnachtsMod implements ModInitializer {
                             .then(Commands.literal("alle").executes(ctx -> removeSnow(ctx.getSource(), -1)))
                             .then(Commands.argument("radius", IntegerArgumentType.integer(8, 1000))
                                     .executes(ctx -> removeSnow(ctx.getSource(), IntegerArgumentType.getInteger(ctx, "radius"))))));
+
+            // /flocken | /flocken stop
+            dispatcher.register(Commands.literal("flocken")
+                    .executes(ctx -> {
+                        flockenAn = true;
+                        ctx.getSource().sendSuccess(() -> Component.literal("Flocken um dich: an. /flocken stop schaltet sie aus.")
+                                .withStyle(ChatFormatting.WHITE), true);
+                        return 1;
+                    })
+                    .then(Commands.literal("stop").executes(ctx -> {
+                        flockenAn = false;
+                        ctx.getSource().sendSuccess(() -> Component.literal("Flocken um dich: aus.")
+                                .withStyle(ChatFormatting.AQUA), true);
+                        return 1;
+                    })));
 
             dispatcher.register(Commands.literal("schneemann").executes(ctx -> {
                 ServerPlayer player = ctx.getSource().getPlayerOrException();
