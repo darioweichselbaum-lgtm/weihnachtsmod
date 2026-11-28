@@ -32,6 +32,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.sounds.SoundEvent;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.decoration.ItemFrame;
 import net.minecraft.world.entity.item.ItemEntity;
@@ -91,14 +92,27 @@ public class WeihnachtsMod implements ModInitializer {
     private static final Map<String, Long> snowmanCooldown = new HashMap<>();
     private static final long SNOWMAN_COOLDOWN_MS = 30_000;
 
-    private static boolean flockenAn = false;   // /flocken: kleine Flocken um den Spieler
     // ---------- /schnee ----------
     private static boolean snowParticles = false;                                   // Partikel an/aus
+    private static boolean ambientSnow = true;                                   // die kleinen Dauer-Flocken um jeden Spieler (aus der urspruenglichen Mod)
     private static final java.util.ArrayDeque<BlockPos> snowPending = new java.util.ArrayDeque<>();  // Spalten, die noch Schnee bekommen
     private static final java.util.ArrayDeque<Long> snowRemoving = new java.util.ArrayDeque<>();     // Schneeschichten, die noch entfernt werden
     private static final Set<Long> snowPlaced = new HashSet<>();                    // alle gesetzten Schneeschichten
     private static final Set<Long> snowKept = new HashSet<>();                      // beim Entfernen nicht geladen, bleiben vorgemerkt
     private static boolean snowLoaded = false;
+
+    // ---------- Zipfelmütze als Extra-Objekt (sitzt über jedem Helm und schwingt beim Laufen) ----------
+    private static final class HatState {
+        UUID display;
+        double lx, ly, lz;
+        boolean hasLast = false;
+        double tilt = 0.0;
+    }
+    private static final Map<UUID, HatState> hatStates = new HashMap<>();
+    private static final double HAT_SCALE = 0.75;          // Groesse der Muetze (1.0 = Modell ist einen Block breit)
+    private static final double HAT_BRIM_Y = -0.12;        // Hoehe des Fellrands unter dem Kopfende (in Bloecken, negativ = tiefer)
+    private static final double HAT_MAX_TILT_DEG = 45.0;   // groesster Ausschlag der Spitze beim Rennen
+    private static final double HAT_SWING_SIGN = 1.0;      // 1.0 oder -1.0: Richtung des Schwungs, falls sie falsch herum schwingt
     private static final Set<Long> snowConverted = new HashSet<>();                 // Erdbloecke unter dem Schnee, die zu Gras wurden
     private static final java.util.ArrayDeque<Long> snowRevert = new java.util.ArrayDeque<>();      // Erdbloecke, die wieder zu Erde werden
     private static final Set<Long> snowConvKept = new HashSet<>();                  // beim Zurueckwandeln nicht geladen
@@ -463,7 +477,9 @@ public class WeihnachtsMod implements ModInitializer {
 
         // Schneeflocken um jeden Spieler (alle 1 Sekunde)
         ServerTickEvents.END_SERVER_TICK.register(server -> {
-            if (server.getTickCount() % 20 != 0 || !flockenAn) return;
+            if (server.getTickCount() % 20 != 0 || !isChristmasSeason()) return;
+            loadSnow();
+            if (!ambientSnow || snowParticles) return;
             for (ServerPlayer player : server.getPlayerList().getPlayers()) {
                 if (player.level() instanceof ServerLevel level) {
                     level.sendParticles(ParticleTypes.SNOWFLAKE,
@@ -553,6 +569,23 @@ public class WeihnachtsMod implements ModInitializer {
                     snowKept.clear();
                     saveSnow();
                 }
+            }
+        });
+
+        // Zipfelmütze als Extra-Objekt: mitlaufen, drehen und schwingen
+        ServerTickEvents.END_SERVER_TICK.register(server -> {
+            if (hatStates.isEmpty()) return;
+            int tick = server.getTickCount();
+            java.util.Iterator<Map.Entry<UUID, HatState>> it = hatStates.entrySet().iterator();
+            while (it.hasNext()) {
+                Map.Entry<UUID, HatState> entry = it.next();
+                ServerPlayer player = server.getPlayerList().getPlayer(entry.getKey());
+                if (player == null) {
+                    killHat(server, entry.getValue());
+                    it.remove();
+                    continue;
+                }
+                updateHat(server, player, entry.getValue(), tick);
             }
         });
 
@@ -698,6 +731,13 @@ public class WeihnachtsMod implements ModInitializer {
                     .executes(ctx -> giveHat(ctx.getSource(), false))
                     .then(Commands.literal("alle").executes(ctx -> giveHat(ctx.getSource(), true))));
 
+            // /zipfelmuetze extra [alle|aus] -> Mütze als Extra-Objekt, sitzt auch über Helmen
+            dispatcher.register(Commands.literal("zipfelmuetze")
+                    .then(Commands.literal("extra")
+                            .executes(ctx -> toggleHat(ctx.getSource()))
+                            .then(Commands.literal("alle").executes(ctx -> hatForAll(ctx.getSource())))
+                            .then(Commands.literal("aus").executes(ctx -> hatOff(ctx.getSource())))));
+
             // /weihnachtshilfe -> zeigt alle Befehle der Mod im Chat
             dispatcher.register(Commands.literal("weihnachtshilfe")
                     .executes(ctx -> showHelp(ctx.getSource())));
@@ -722,21 +762,6 @@ public class WeihnachtsMod implements ModInitializer {
                             .then(Commands.literal("alle").executes(ctx -> removeSnow(ctx.getSource(), -1)))
                             .then(Commands.argument("radius", IntegerArgumentType.integer(8, 1000))
                                     .executes(ctx -> removeSnow(ctx.getSource(), IntegerArgumentType.getInteger(ctx, "radius"))))));
-
-            // /flocken | /flocken stop
-            dispatcher.register(Commands.literal("flocken")
-                    .executes(ctx -> {
-                        flockenAn = true;
-                        ctx.getSource().sendSuccess(() -> Component.literal("Flocken um dich: an. /flocken stop schaltet sie aus.")
-                                .withStyle(ChatFormatting.WHITE), true);
-                        return 1;
-                    })
-                    .then(Commands.literal("stop").executes(ctx -> {
-                        flockenAn = false;
-                        ctx.getSource().sendSuccess(() -> Component.literal("Flocken um dich: aus.")
-                                .withStyle(ChatFormatting.AQUA), true);
-                        return 1;
-                    })));
 
             dispatcher.register(Commands.literal("schneemann").executes(ctx -> {
                 ServerPlayer player = ctx.getSource().getPlayerOrException();
@@ -874,6 +899,7 @@ public class WeihnachtsMod implements ModInitializer {
                 long[] conv = gson.fromJson(obj.get("converted"), long[].class);
                 for (long l : conv) snowConverted.add(l);
             }
+            if (obj != null && obj.has("ambient")) ambientSnow = obj.get("ambient").getAsBoolean();
             if (obj != null && obj.has("convertedGrass")) {
                 long[] conv = gson.fromJson(obj.get("convertedGrass"), long[].class);
                 for (long l : conv) snowConvGrass.add(l);
@@ -891,6 +917,7 @@ public class WeihnachtsMod implements ModInitializer {
             Gson gson = new Gson();
             JsonObject obj = new JsonObject();
             obj.add("positions", gson.toJsonTree(arr));
+            obj.addProperty("ambient", ambientSnow);
             long[] conv = new long[snowConverted.size()];
             int j = 0;
             for (long l : snowConverted) conv[j++] = l;
@@ -956,6 +983,7 @@ public class WeihnachtsMod implements ModInitializer {
         }
         loadSnow();
         snowParticles = true;
+        ambientSnow = true;
         if (level.isRaining() || level.isThundering()) clearWeather(server);
         final int cx = player.getBlockX();
         final int cz = player.getBlockZ();
@@ -975,9 +1003,12 @@ public class WeihnachtsMod implements ModInitializer {
     }
 
     private static int stopSnow(CommandSourceStack source) {
+        loadSnow();
         snowParticles = false;
+        ambientSnow = false;   // auch die kleinen Dauer-Flocken um die Spieler
         snowPending.clear();
-        source.sendSuccess(() -> Component.literal("Die Schneeflocken hören auf. Der Schnee am Boden bleibt, /schnee weg räumt ihn weg.")
+        saveSnow();
+        source.sendSuccess(() -> Component.literal("Alle Schneeflocken hören auf. Der Schnee am Boden bleibt, /schnee weg räumt ihn weg. /schnee bringt die Flocken zurück.")
                 .withStyle(ChatFormatting.AQUA), true);
         return 1;
     }
@@ -1020,6 +1051,8 @@ public class WeihnachtsMod implements ModInitializer {
     private static int removeSnow(CommandSourceStack source, int radius) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         ServerPlayer player = source.getPlayerOrException();
         loadSnow();
+        snowParticles = false;
+        ambientSnow = false;
         snowPending.clear();
         final int cx = player.getBlockX();
         final int cz = player.getBlockZ();
@@ -1028,6 +1061,7 @@ public class WeihnachtsMod implements ModInitializer {
         snowRevert.addAll(takeInRadius(snowConverted, cx, cz, radius));
         snowRevertGrass.addAll(takeInRadius(snowConvGrass, cx, cz, radius));
         final int count = layers.size();
+        if (count == 0) saveSnow();
         final String where = radius < 0 ? "überall" : "im Umkreis von " + radius + " Blöcken";
         source.sendSuccess(() -> Component.literal("Der Schnee wird " + where + " weggeräumt (" + count
                 + " Schichten). Entfernte Bereiche werden dafür kurz nachgeladen, das dauert ein paar Sekunden.")
@@ -1075,6 +1109,159 @@ public class WeihnachtsMod implements ModInitializer {
         return given;
     }
 
+    // ---------- Zipfelmütze als Extra-Objekt: Hilfsmethoden ----------
+
+    private static String fl(double v) {
+        return String.format(java.util.Locale.ROOT, "%.4f", v) + "f";
+    }
+
+    /** Dreht den Vektor v mit dem Quaternion q (x, y, z, w). */
+    private static double[] rotateVec(double[] q, double[] v) {
+        double qx = q[0], qy = q[1], qz = q[2], qw = q[3];
+        double tx = 2 * (qy * v[2] - qz * v[1]);
+        double ty = 2 * (qz * v[0] - qx * v[2]);
+        double tz = 2 * (qx * v[1] - qy * v[0]);
+        return new double[] {
+            v[0] + qw * tx + (qy * tz - qz * ty),
+            v[1] + qw * ty + (qz * tx - qx * tz),
+            v[2] + qw * tz + (qx * ty - qy * tx)
+        };
+    }
+
+    private static double[] quatMul(double[] a, double[] b) {
+        return new double[] {
+            a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+            a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+            a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+            a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]
+        };
+    }
+
+    /** NBT der Transformation: Mütze nach hinten gedreht, um den Fellrand um tiltDeg gekippt. */
+    private static String hatTransform(double tiltDeg) {
+        double phi = Math.toRadians(tiltDeg * HAT_SWING_SIGN);
+        double[] tilt = {Math.sin(phi / 2), 0, 0, Math.cos(phi / 2)};
+        double[] turn = {0, 1, 0, 0};                      // 180 Grad um die Hochachse: Spitze zeigt nach hinten
+        double[] q = quatMul(tilt, turn);
+        double[] brim = {0, -0.4375 * HAT_SCALE, 0};       // Fellrand relativ zur Modellmitte
+        double[] rotated = rotateVec(q, brim);
+        double tx = 0 - rotated[0];
+        double ty = HAT_BRIM_Y - rotated[1];
+        double tz = 0 - rotated[2];
+        return "transformation:{translation:[" + fl(tx) + "," + fl(ty) + "," + fl(tz) + "],left_rotation:["
+                + fl(q[0]) + "," + fl(q[1]) + "," + fl(q[2]) + "," + fl(q[3]) + "],scale:["
+                + fl(HAT_SCALE) + "," + fl(HAT_SCALE) + "," + fl(HAT_SCALE) + "],right_rotation:[0.0f,0.0f,0.0f,1.0f]}";
+    }
+
+    private static void runCommand(MinecraftServer server, String command) {
+        server.getCommands().performPrefixedCommand(server.createCommandSourceStack().withSuppressedOutput(), command);
+    }
+
+    private static void killHat(MinecraftServer server, HatState st) {
+        if (st != null && st.display != null) runCommand(server, "kill " + st.display);
+    }
+
+    private static void spawnHat(MinecraftServer server, ServerPlayer player, HatState st) {
+        if (!(player.level() instanceof ServerLevel level)) return;
+        killHat(server, st);
+        UUID id = UUID.randomUUID();
+        st.display = id;
+        long most = id.getMostSignificantBits();
+        long least = id.getLeastSignificantBits();
+        String uuidNbt = "[I;" + (int) (most >>> 32) + "," + (int) most + "," + (int) (least >>> 32) + "," + (int) least + "]";
+        String pos = String.format(java.util.Locale.ROOT, "%.3f %.3f %.3f", player.getX(), player.getY() + player.getBbHeight(), player.getZ());
+        CommandSourceStack stack = server.createCommandSourceStack().withLevel(level).withSuppressedOutput();
+        server.getCommands().performPrefixedCommand(stack, "summon item_display " + pos
+                + " {UUID:" + uuidNbt + ",Tags:[\"zmhat\"],item:{id:\"minecraft:paper\",count:1,components:"
+                + "{\"minecraft:item_model\":\"weihnachtsmod:zipfelmuetze\"}},item_display:\"none\",teleport_duration:2,"
+                + hatTransform(0) + "}");
+        st.hasLast = false;
+        st.tilt = 0;
+    }
+
+    private static void updateHat(MinecraftServer server, ServerPlayer player, HatState st, int tick) {
+        if (!(player.level() instanceof ServerLevel level)) return;
+        Entity display = st.display == null ? null : level.getEntity(st.display);
+        if (display == null || display.isRemoved()) {
+            if (tick % 10 == 0) spawnHat(server, player, st);
+            return;
+        }
+        // jeden Tick: an den Kopf setzen und mit dem Kopf drehen
+        display.setPos(player.getX(), player.getY() + player.getBbHeight(), player.getZ());
+        display.setYRot(player.getYHeadRot());
+        display.setXRot(0.0F);
+        // alle 2 Ticks: Schwung je nach Geschwindigkeit
+        if (tick % 2 != 0) return;
+        double dx = player.getX() - st.lx;
+        double dy = player.getY() - st.ly;
+        double dz = player.getZ() - st.lz;
+        boolean had = st.hasLast;
+        st.lx = player.getX();
+        st.ly = player.getY();
+        st.lz = player.getZ();
+        st.hasLast = true;
+        double target = 0;
+        if (had) {
+            double speed = Math.sqrt(dx * dx + dz * dz);
+            target = Math.min(HAT_MAX_TILT_DEG, speed * 70.0 + Math.min(25.0, Math.abs(dy) * 60.0));
+        }
+        st.tilt += (target - st.tilt) * 0.35;
+        runCommand(server, "data merge entity " + st.display + " {" + hatTransform(st.tilt)
+                + ",start_interpolation:0,interpolation_duration:3}");
+    }
+
+    private static void enableHat(MinecraftServer server, ServerPlayer player) {
+        if (hatStates.containsKey(player.getUUID())) return;
+        if (hatStates.isEmpty()) runCommand(server, "kill @e[tag=zmhat]");   // Reste von einem Neustart wegraeumen
+        HatState st = new HatState();
+        hatStates.put(player.getUUID(), st);
+        spawnHat(server, player, st);
+    }
+
+    private static int toggleHat(CommandSourceStack source) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        if (!(player.level() instanceof ServerLevel level)) return 0;
+        MinecraftServer server = level.getServer();
+        HatState old = hatStates.remove(player.getUUID());
+        if (old != null) {
+            killHat(server, old);
+            source.sendSuccess(() -> Component.literal("Die Extra-Mütze ist aus.").withStyle(ChatFormatting.RED), false);
+            return 1;
+        }
+        enableHat(server, player);
+        source.sendSuccess(() -> Component.literal("🎅 Extra-Mütze an. Sie sitzt über deinem Helm. Mit /zipfelmuetze extra schaltest du sie wieder aus.")
+                .withStyle(ChatFormatting.RED), false);
+        return 1;
+    }
+
+    private static int hatForAll(CommandSourceStack source) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer self = source.getPlayerOrException();
+        if (!(self.level() instanceof ServerLevel level)) return 0;
+        MinecraftServer server = level.getServer();
+        int n = 0;
+        for (ServerPlayer p : new ArrayList<>(server.getPlayerList().getPlayers())) {
+            if (!hatStates.containsKey(p.getUUID())) {
+                enableHat(server, p);
+                n++;
+            }
+        }
+        final int count = n;
+        source.sendSuccess(() -> Component.literal("🎅 " + count + " Spieler tragen jetzt die Extra-Mütze. /zipfelmuetze extra aus schaltet alle aus.")
+                .withStyle(ChatFormatting.RED), true);
+        return n;
+    }
+
+    private static int hatOff(CommandSourceStack source) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer self = source.getPlayerOrException();
+        if (!(self.level() instanceof ServerLevel level)) return 0;
+        MinecraftServer server = level.getServer();
+        for (HatState st : hatStates.values()) killHat(server, st);
+        hatStates.clear();
+        runCommand(server, "kill @e[tag=zmhat]");
+        source.sendSuccess(() -> Component.literal("Alle Extra-Mützen sind weg.").withStyle(ChatFormatting.RED), true);
+        return 1;
+    }
+
     private static void helpLine(CommandSourceStack source, String command, String text) {
         source.sendSuccess(() -> Component.literal(command).withStyle(ChatFormatting.AQUA)
                 .append(Component.literal("  " + text).withStyle(ChatFormatting.GRAY)), false);
@@ -1105,6 +1292,7 @@ public class WeihnachtsMod implements ModInitializer {
         helpTitle(source, "Zipfelmütze");
         helpLine(source, "/zipfelmuetze", "Setzt dir eine Zipfelmütze auf");
         helpLine(source, "/zipfelmuetze alle", "Setzt allen Spielern, die online sind, eine Zipfelmütze auf");
+        helpLine(source, "/zipfelmuetze extra [alle|aus]", "Mütze als Extra-Objekt über dem Helm, schwingt beim Laufen (Test)");
         helpTitle(source, "Weihnachtslieder");
         helpLine(source, "/weihnachtslied", "Zufälliges Lied");
         helpLine(source, "/weihnachtslied <lied> [spieler]", "Bestimmtes Lied, optional für einen Spieler");
